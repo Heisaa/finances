@@ -406,6 +406,70 @@ describe('calculateGrowth', () => {
     expect(age65!.balance).toBeGreaterThan(age35!.balance)
   })
 
+  // Variable return rate tests
+  it('should use global rate when period has no annualReturn', () => {
+    const withGlobal = calculateGrowth({
+      initialAmount: 100000,
+      periods: [{ startAge: 30, endAge: 40, monthlyContribution: 0, monthlySpending: 0 }],
+      annualReturn: 7,
+      endAge: 40
+    })
+    const withExplicit = calculateGrowth({
+      initialAmount: 100000,
+      periods: [{ startAge: 30, endAge: 40, monthlyContribution: 0, monthlySpending: 0, annualReturn: 7 }],
+      annualReturn: 7,
+      endAge: 40
+    })
+    expect(withGlobal[10].balance).toBeCloseTo(withExplicit[10].balance, 2)
+  })
+
+  it('should use period-specific return rate when provided', () => {
+    const highReturn = calculateGrowth({
+      initialAmount: 100000,
+      periods: [{ startAge: 30, endAge: 40, monthlyContribution: 0, monthlySpending: 0, annualReturn: 10 }],
+      annualReturn: 5,
+      endAge: 40
+    })
+    const lowReturn = calculateGrowth({
+      initialAmount: 100000,
+      periods: [{ startAge: 30, endAge: 40, monthlyContribution: 0, monthlySpending: 0, annualReturn: 5 }],
+      annualReturn: 5,
+      endAge: 40
+    })
+    expect(highReturn[10].balance).toBeGreaterThan(lowReturn[10].balance)
+  })
+
+  it('should handle mixed periods with different return rates', () => {
+    const result = calculateGrowth({
+      initialAmount: 100000,
+      periods: [
+        { startAge: 30, endAge: 40, monthlyContribution: 1000, monthlySpending: 0, annualReturn: 10 },
+        { startAge: 40, endAge: 50, monthlyContribution: 0, monthlySpending: 0, annualReturn: 3 }
+      ],
+      annualReturn: 7,
+      endAge: 50
+    })
+    const age40 = result.find(r => r.age === 40)!
+    const age50 = result.find(r => r.age === 50)!
+    // Growth from 40-50 at 3% should be modest
+    expect(age50.balance).toBeGreaterThan(age40.balance)
+    expect(age50.balance).toBeLessThan(age40.balance * 2)
+  })
+
+  it('should not affect legacy function with variable returns', () => {
+    const result = calculateGrowthLegacy({
+      initialAmount: 10000,
+      monthlyContribution: 500,
+      monthlySpending: 0,
+      annualReturn: 7,
+      startAge: 30,
+      retirementAge: 31,
+      endAge: 31
+    })
+    expect(result[1].contributions).toBe(10000 + 500 * 12)
+    expect(result[1].balance).toBeGreaterThan(16000)
+  })
+
   it('should handle gap periods with no contributions or spending', () => {
     const result = calculateGrowth({
       initialAmount: 100000,
@@ -425,5 +489,139 @@ describe('calculateGrowth', () => {
 
     // Contributions should stay the same during coast period
     expect(age50!.contributions).toBe(age40!.contributions)
+  })
+
+  // Inflation tests
+  it('should have realBalance equal to balance when inflationRate is 0', () => {
+    const result = calculateGrowth({
+      initialAmount: 100000,
+      periods: [{ startAge: 30, endAge: 50, monthlyContribution: 1000, monthlySpending: 0 }],
+      annualReturn: 7,
+      endAge: 50,
+      inflationRate: 0
+    })
+    for (const entry of result) {
+      expect(entry.realBalance).toBeCloseTo(entry.balance, 2)
+    }
+  })
+
+  it('should have realBalance less than balance when inflationRate > 0', () => {
+    const result = calculateGrowth({
+      initialAmount: 100000,
+      periods: [{ startAge: 30, endAge: 50, monthlyContribution: 1000, monthlySpending: 0 }],
+      annualReturn: 7,
+      endAge: 50,
+      inflationRate: 3
+    })
+    // At year 0, realBalance === balance
+    expect(result[0].realBalance).toBeCloseTo(result[0].balance, 2)
+    // After year 0, realBalance < balance
+    for (let i = 1; i < result.length; i++) {
+      expect(result[i].realBalance).toBeLessThan(result[i].balance)
+    }
+  })
+
+  it('should reduce final balance with higher inflation due to spending growth', () => {
+    const lowInflation = calculateGrowth({
+      initialAmount: 1000000,
+      periods: [{ startAge: 65, endAge: 100, monthlyContribution: 0, monthlySpending: 3000 }],
+      annualReturn: 7,
+      endAge: 95,
+      inflationRate: 1
+    })
+    const highInflation = calculateGrowth({
+      initialAmount: 1000000,
+      periods: [{ startAge: 65, endAge: 100, monthlyContribution: 0, monthlySpending: 3000 }],
+      annualReturn: 7,
+      endAge: 95,
+      inflationRate: 5
+    })
+    const lowFinal = lowInflation[lowInflation.length - 1]
+    const highFinal = highInflation[highInflation.length - 1]
+    expect(highFinal.balance).toBeLessThan(lowFinal.balance)
+  })
+
+  it('should deflate realBalance correctly', () => {
+    const result = calculateGrowth({
+      initialAmount: 100000,
+      periods: [{ startAge: 30, endAge: 40, monthlyContribution: 0, monthlySpending: 0 }],
+      annualReturn: 0,
+      endAge: 40,
+      inflationRate: 2
+    })
+    // With 0% return and 0 spending, balance stays 100k but real value decreases
+    // After 10 years at 2%: realBalance ≈ 100000 / (1.02)^10
+    const final = result[result.length - 1]
+    const expected = 100000 / Math.pow(1.02, 10)
+    expect(final.realBalance).toBeCloseTo(expected, 0)
+  })
+
+  it('should not inflate contributions', () => {
+    const result = calculateGrowth({
+      initialAmount: 0,
+      periods: [{ startAge: 30, endAge: 32, monthlyContribution: 1000, monthlySpending: 0 }],
+      annualReturn: 0,
+      endAge: 32,
+      inflationRate: 5
+    })
+    // 24 months of 1000 contributions
+    expect(result[result.length - 1].contributions).toBe(1000 * 24)
+  })
+
+  // ISK Tax tests
+  it('should have taxPaid 0 when ISK is disabled', () => {
+    const result = calculateGrowth({
+      initialAmount: 1000000,
+      periods: [{ startAge: 30, endAge: 40, monthlyContribution: 0, monthlySpending: 0 }],
+      annualReturn: 7,
+      endAge: 40
+    })
+    for (const entry of result) {
+      expect(entry.taxPaid).toBe(0)
+    }
+  })
+
+  it('should compute ISK tax correctly for simple case', () => {
+    // 1M balance, 2.5% gov rate → annual tax floor = 1M * 0.025 * 0.30 = 7500
+    const result = calculateGrowth({
+      initialAmount: 1000000,
+      periods: [{ startAge: 30, endAge: 32, monthlyContribution: 0, monthlySpending: 0 }],
+      annualReturn: 0,
+      endAge: 32,
+      iskTax: { enabled: true, governmentBorrowingRate: 2.5 }
+    })
+    // After first year at 0% return: tax = 1000000 * 0.025 * 0.30 = 7500
+    expect(result[1].taxPaid).toBeCloseTo(7500, 0)
+    // After second year: tax on reduced balance
+    expect(result[2].taxPaid).toBeGreaterThan(result[1].taxPaid)
+  })
+
+  it('should accumulate ISK tax over time', () => {
+    const result = calculateGrowth({
+      initialAmount: 1000000,
+      periods: [{ startAge: 30, endAge: 40, monthlyContribution: 1000, monthlySpending: 0 }],
+      annualReturn: 7,
+      endAge: 40,
+      iskTax: { enabled: true, governmentBorrowingRate: 2.5 }
+    })
+    // Tax should grow each year
+    for (let i = 2; i < result.length; i++) {
+      expect(result[i].taxPaid).toBeGreaterThan(result[i - 1].taxPaid)
+    }
+  })
+
+  it('should reduce final balance with ISK tax vs without', () => {
+    const base = { initialAmount: 500000, periods: [{ startAge: 30, endAge: 50, monthlyContribution: 2000, monthlySpending: 0 }], annualReturn: 7, endAge: 50 }
+    const withoutTax = calculateGrowth(base)
+    const withTax = calculateGrowth({ ...base, iskTax: { enabled: true, governmentBorrowingRate: 2.5 } })
+    expect(withTax[withTax.length - 1].balance).toBeLessThan(withoutTax[withoutTax.length - 1].balance)
+  })
+
+  it('should produce proportional tax with different borrowing rates', () => {
+    const base = { initialAmount: 1000000, periods: [{ startAge: 30, endAge: 31, monthlyContribution: 0, monthlySpending: 0 }], annualReturn: 0, endAge: 31 }
+    const low = calculateGrowth({ ...base, iskTax: { enabled: true, governmentBorrowingRate: 1.0 } })
+    const high = calculateGrowth({ ...base, iskTax: { enabled: true, governmentBorrowingRate: 2.0 } })
+    // Tax should be roughly double
+    expect(high[1].taxPaid).toBeCloseTo(low[1].taxPaid * 2, 0)
   })
 })
